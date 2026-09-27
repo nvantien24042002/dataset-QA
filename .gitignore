@@ -17,6 +17,9 @@ yarn-error.log*
 # Test coverage
 coverage/
 
+# Runtime data (SQLite DB + image/export binaries) — v2.md §14
+data/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

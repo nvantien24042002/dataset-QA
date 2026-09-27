@@ -5,10 +5,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "migrate": "node scripts/migrate.js",
     "test": "node --test"
   },
   "license": "MIT",
   "dependencies": {
+    "better-sqlite3": "13.0.3",
     "express": "4.21.2"
   }
 }

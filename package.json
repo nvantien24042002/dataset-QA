@@ -1,0 +1,14 @@
+{
+  "name": "dataset-qa",
+  "version": "1.0.0",
+  "description": "Local, deterministic rule-based QA tool for 2D Computer Vision datasets (COCO JSON). See v1.md.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "4.21.2"
+  }
+}

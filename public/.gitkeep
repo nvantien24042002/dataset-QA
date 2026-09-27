@@ -1,0 +1,2 @@
+# Placeholder so the public/ directory (served as static content by server.js)
+# is tracked by git. The dashboard files are added in a later phase.

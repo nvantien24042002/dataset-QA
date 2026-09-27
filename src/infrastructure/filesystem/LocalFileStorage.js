@@ -61,6 +61,30 @@ class LocalFileStorage extends FileStorage {
   resolve(relativePath) {
     return this._resolve(relativePath);
   }
+
+  // Move a staged directory/file to its published location (v2.md §12: publish
+  // only after validation succeeds). Overwrites any existing destination.
+  move(fromRel, toRel) {
+    const from = this._resolve(fromRel);
+    const to = this._resolve(toRel);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    if (fs.existsSync(to)) fs.rmSync(to, { recursive: true, force: true });
+    try {
+      fs.renameSync(from, to);
+    } catch (e) {
+      if (e.code === 'EXDEV') {
+        fs.cpSync(from, to, { recursive: true });
+        fs.rmSync(from, { recursive: true, force: true });
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  // Recursively remove a directory (used to compensate a failed publish).
+  removeDir(relativePath) {
+    fs.rmSync(this._resolve(relativePath), { recursive: true, force: true });
+  }
 }
 
 module.exports = { LocalFileStorage };

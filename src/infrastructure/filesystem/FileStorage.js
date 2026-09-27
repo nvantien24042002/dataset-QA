@@ -31,6 +31,16 @@ class FileStorage {
   resolve(relativePath) {
     throw new Error('FileStorage.resolve is not implemented');
   }
+
+  /** Move a staged relative path to a published relative path. */
+  move(fromRelativePath, toRelativePath) {
+    throw new Error('FileStorage.move is not implemented');
+  }
+
+  /** Recursively remove a relative directory (no-op if absent). */
+  removeDir(relativePath) {
+    throw new Error('FileStorage.removeDir is not implemented');
+  }
 }
 
 module.exports = { FileStorage };

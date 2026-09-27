@@ -6,6 +6,8 @@
 // READY versions (INV-05) is enforced by higher layers in later phases.
 
 const { BaseRepository } = require('./BaseRepository');
+const { assertCanTransition } = require('../../domain/version/VersionStatus');
+const { NotFoundError } = require('../../domain/errors');
 
 class DatasetVersionRepository extends BaseRepository {
   /**
@@ -41,6 +43,26 @@ class DatasetVersionRepository extends BaseRepository {
     return this.db
       .prepare(`SELECT * FROM dataset_versions WHERE dataset_id = ? ORDER BY version_number ASC`)
       .all(datasetId);
+  }
+
+  /** Next version number for a dataset (1-based). Supports INV-01 sequencing. */
+  nextVersionNumber(datasetId) {
+    const row = this.db
+      .prepare(`SELECT MAX(version_number) AS max FROM dataset_versions WHERE dataset_id = ?`)
+      .get(datasetId);
+    return (row && row.max ? row.max : 0) + 1;
+  }
+
+  /**
+   * Transition a version's status, enforcing the state machine (v2.md §22) and
+   * READY immutability (INV-05): only DRAFT→READY and READY→ARCHIVED are legal.
+   */
+  updateStatus(id, toStatus) {
+    const current = this.findById(id);
+    if (!current) throw new NotFoundError('DatasetVersion not found', { id });
+    assertCanTransition(current.status, toStatus);
+    this.db.prepare(`UPDATE dataset_versions SET status = ? WHERE id = ?`).run(toStatus, id);
+    return this.findById(id);
   }
 }
 

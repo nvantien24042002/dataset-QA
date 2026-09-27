@@ -31,6 +31,13 @@ class DatasetRepository extends BaseRepository {
   findAll() {
     return this.db.prepare(`SELECT * FROM datasets ORDER BY created_at DESC, id ASC`).all();
   }
+
+  /** Create the dataset only if it does not already exist; returns the row. */
+  upsert(dataset) {
+    const existing = this.findById(dataset.id);
+    if (existing) return existing;
+    return this.create(dataset);
+  }
 }
 
 module.exports = { DatasetRepository };

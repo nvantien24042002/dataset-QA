@@ -21,15 +21,7 @@
 // This module carries no QA severity, review decision, reviewer state, or image
 // dimensions (INV-41, INV-43). Out-of-image is a separate concern (v2.md §5.6.7).
 
-const GeometryValidationStatus = Object.freeze({
-  VALID: 'VALID',
-  DEGENERATE: 'DEGENERATE',
-  INVALID: 'INVALID',
-});
-
-const GeometryIssueCode = Object.freeze({
-  ZERO_AREA: 'ZERO_AREA',
-});
+const { GeometryValidationStatus, GeometryIssueCode } = require('./validation');
 
 // x2 is the EXCLUSIVE right boundary: x2 = x + width (v2.md §5.6.2).
 function bboxX2(bbox) {

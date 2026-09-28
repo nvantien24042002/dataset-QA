@@ -49,6 +49,48 @@ function createBBox({ x, y, width, height }) {
   return Object.freeze({ x, y, width, height });
 }
 
+const pointsEqual = (a, b) => a.x === b.x && a.y === b.y;
+
+const countDistinctPoints = (points) => new Set(points.map((p) => `${p.x},${p.y}`)).size;
+
+// Polygon — canonical ordered list of Point2D in IMAGE_PIXEL space (v2.md §5.4,
+// §5.6.3). Data + construction-time structural guards only; derived geometry
+// (bounds/area/perimeter) and semantic validation live in polygon.js, and
+// Polygon topology (self-intersection) is Phase 3 Step 3 (NOT implemented here).
+//
+// Structural contract (v2.md §5.6.3), all rejected at construction:
+//   - input MUST be an array; each point MUST have finite x, y (via Point2D);
+//   - consecutive duplicate points (e.g. A,B,B,C) are INVALID structure;
+//   - at least 3 DISTINCT points are required (raw length is not sufficient).
+// Logical closure: repeating the first point is NOT required. A trailing point
+// equal to the first (A,B,C,A) is the ONLY permitted duplicate-endpoint case and
+// is canonicalized away to A,B,C. Non-consecutive repeated points are NOT
+// rejected here (that is out of the contract; topology is Step 3).
+function createPolygon(rawPoints) {
+  if (!Array.isArray(rawPoints)) {
+    throw new ValidationError('Polygon must be an array of points', { rawPoints });
+  }
+  const points = rawPoints.map(createPoint2D);
+  for (let i = 0; i < points.length - 1; i += 1) {
+    if (pointsEqual(points[i], points[i + 1])) {
+      throw new ValidationError('Polygon has consecutive duplicate points', { index: i });
+    }
+  }
+  // Canonicalize the logical-closure endpoint: drop a trailing point equal to
+  // the first (this is not a consecutive duplicate — the closing edge follows
+  // normal polygon adjacency).
+  let canonical = points;
+  if (points.length >= 2 && pointsEqual(points[0], points[points.length - 1])) {
+    canonical = points.slice(0, -1);
+  }
+  if (countDistinctPoints(canonical) < 3) {
+    throw new ValidationError('Polygon requires at least 3 distinct points', {
+      distinct: countDistinctPoints(canonical),
+    });
+  }
+  return Object.freeze(canonical);
+}
+
 function createPolygonRing(points) {
   if (!Array.isArray(points) || points.length === 0) {
     throw new ValidationError('Polygon ring must be a non-empty array of points');
@@ -112,6 +154,7 @@ module.exports = {
   SegmentationEncoding,
   createPoint2D,
   createBBox,
+  createPolygon,
   createPolygonRing,
   createSegmentationPolygon,
   createSegmentationRle,

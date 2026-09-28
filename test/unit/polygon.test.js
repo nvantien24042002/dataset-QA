@@ -13,6 +13,7 @@ const {
   polygonArea,
   polygonPerimeter,
   validatePolygon,
+  hasSelfIntersection,
   GeometryValidationStatus,
   GeometryIssueCode,
 } = require('../../src/domain/geometry/polygon');
@@ -166,4 +167,118 @@ test('a constructed polygon and its points are frozen', () => {
   const poly = createPolygon([P(0, 0), P(4, 0), P(0, 3)]);
   assert.strictEqual(Object.isFrozen(poly), true);
   assert.strictEqual(Object.isFrozen(poly[0]), true);
+});
+
+// --- Polygon topology / self-intersection (Step 3, v2.md §5.4, §5.6.3) ---
+// hasSelfIntersection() is true iff a pair of NON-ADJACENT edges intersect or
+// overlap. Adjacent-edge vertex sharing (including the closing edge and the
+// first edge) is normal polygon adjacency, not self-intersection.
+
+// (A) Simple triangle: all edge pairs are adjacent (N: cyclic adjacency) => false.
+test('triangle is not self-intersecting', () => {
+  assert.strictEqual(hasSelfIntersection(createPolygon([P(0, 0), P(4, 0), P(0, 3)])), false);
+});
+
+// (B) Convex rectangle: non-adjacent edges are parallel and disjoint => false.
+test('rectangle is not self-intersecting', () => {
+  const poly = createPolygon([P(0, 0), P(4, 0), P(4, 4), P(0, 4)]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (C) Concave-but-simple polygon (rectilinear L): no edges cross => false.
+test('concave simple polygon is not self-intersecting', () => {
+  const poly = createPolygon([P(0, 0), P(4, 0), P(4, 2), P(2, 2), P(2, 4), P(0, 4)]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (D) Adjacent edges share exactly one vertex — never reported as intersection.
+test('adjacent edges sharing a vertex are not self-intersection', () => {
+  // Every consecutive edge pair shares a vertex; a simple quad stays false.
+  const poly = createPolygon([P(0, 0), P(4, 0), P(4, 4), P(0, 4)]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (E) Closing edge collinear with and touching the first edge at P0 only —
+// adjacency (E(n-1), E0) is excluded, so this is not self-intersection.
+test('closing edge touching first edge at the shared first vertex is not self-intersection', () => {
+  // E0 = (0,0)->(2,0) and E3 = (-3,0)->(0,0) are collinear, meeting only at P0.
+  const poly = createPolygon([P(0, 0), P(2, 0), P(2, 3), P(-3, 0)]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (F) Bow-tie quadrilateral: E0 and E2 cross => true.
+test('bow-tie quadrilateral is self-intersecting', () => {
+  const poly = createPolygon([P(0, 0), P(4, 4), P(4, 0), P(0, 4)]);
+  assert.strictEqual(hasSelfIntersection(poly), true);
+});
+
+// (G) Non-adjacent edges crossing properly (interior crossing) => true.
+test('non-adjacent proper crossing is self-intersecting', () => {
+  // E1 = (2,0)->(0,2) and E3 = (2,2)->(0,0) cross at (1,1).
+  const poly = createPolygon([P(0, 0), P(2, 0), P(0, 2), P(2, 2)]);
+  assert.strictEqual(hasSelfIntersection(poly), true);
+});
+
+// (H) Non-adjacent edge endpoint touching another edge's interior (T-junction) => true.
+test('non-adjacent endpoint touching an edge interior is self-intersecting', () => {
+  // E2 = (2,4)->(2,0): its endpoint (2,0) lies on E0 = (0,0)->(4,0). E0 and E2
+  // are non-adjacent.
+  const poly = createPolygon([P(0, 0), P(4, 0), P(2, 4), P(2, 0)]);
+  assert.strictEqual(hasSelfIntersection(poly), true);
+});
+
+// (I) Non-adjacent collinear overlapping edges => true.
+test('non-adjacent collinear overlapping edges are self-intersecting', () => {
+  // E0 = (0,0)->(4,0) and E3 = (2,0)->(1,0) are collinear on y=0 and overlap.
+  const poly = createPolygon([P(0, 0), P(4, 0), P(4, 3), P(2, 0), P(1, 0)]);
+  assert.strictEqual(hasSelfIntersection(poly), true);
+});
+
+// (J) Non-adjacent collinear but disjoint edges => false.
+test('non-adjacent collinear disjoint edges are not self-intersecting', () => {
+  // Rectangle [0,4]x[0,2] with a rectangular notch cut from the bottom middle.
+  // E0 = (0,0)->(1,0) and E4 = (3,0)->(4,0) are collinear on y=0 but disjoint.
+  const poly = createPolygon([
+    P(0, 0), P(1, 0), P(1, 1), P(3, 1), P(3, 0), P(4, 0), P(4, 2), P(0, 2),
+  ]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (K) Non-adjacent parallel disjoint edges => false.
+test('non-adjacent parallel disjoint edges are not self-intersecting', () => {
+  // Rectangle top/bottom and left/right edges are parallel and never meet.
+  const poly = createPolygon([P(0, 0), P(6, 0), P(6, 3), P(0, 3)]);
+  assert.strictEqual(hasSelfIntersection(poly), false);
+});
+
+// (L) Non-consecutive repeated vertex: construction does not reject; topology
+// decides. Here the repeat reuses an edge, so it IS self-intersecting.
+test('non-consecutive repeated vertex is decided by topology (true here)', () => {
+  // A,B,C,A,B: E0 = A->B and E3 = A->B coincide (non-adjacent) => overlap.
+  const poly = createPolygon([P(0, 0), P(4, 0), P(4, 4), P(0, 0), P(4, 0)]);
+  assert.strictEqual(hasSelfIntersection(poly), true);
+});
+
+// (M) Logical closure equivalence: A,B,C,A canonicalizes to A,B,C and yields the
+// same topology result as the explicit A,B,C.
+test('logical closure yields the same self-intersection result as explicit closure', () => {
+  const closed = createPolygon([P(0, 0), P(4, 0), P(0, 3), P(0, 0)]);
+  const open = createPolygon([P(0, 0), P(4, 0), P(0, 3)]);
+  assert.strictEqual(hasSelfIntersection(closed), hasSelfIntersection(open));
+  assert.strictEqual(hasSelfIntersection(closed), false);
+});
+
+// (N) Triangle cyclic adjacency: the closing edge is adjacent to the first edge,
+// so a valid triangle is never self-intersecting.
+test('triangle closing edge adjacency is not self-intersection', () => {
+  assert.strictEqual(hasSelfIntersection(createPolygon([P(1, 1), P(5, 1), P(3, 6)])), false);
+});
+
+// Topology is a pure fact and does NOT change semantic validation: a
+// self-intersecting but non-zero-area polygon still validates as VALID here
+// (SELF_INTERSECTION integration is deferred to a later step).
+test('hasSelfIntersection does not alter validatePolygon status', () => {
+  const bowtie = createPolygon([P(0, 0), P(4, 4), P(4, 0), P(0, 4)]);
+  assert.strictEqual(hasSelfIntersection(bowtie), true);
+  assert.notStrictEqual(validatePolygon(bowtie).status, GeometryValidationStatus.INVALID);
 });

@@ -25,9 +25,26 @@ const SegmentationEncoding = Object.freeze({
 
 const isFiniteNum = (n) => typeof n === 'number' && Number.isFinite(n);
 
+// Point2D — canonical 2D point in IMAGE_PIXEL space (v2.md §5.2, §5.6.1). Data
+// only: x and y MUST be finite numbers; NaN / Infinity / -Infinity are rejected
+// at construction. A Point2D knows nothing about image dimensions, viewer
+// transforms, QA, or persistence.
+function createPoint2D({ x, y }) {
+  if (!isFiniteNum(x) || !isFiniteNum(y)) {
+    throw new ValidationError('Point2D requires finite x, y', { x, y });
+  }
+  return Object.freeze({ x, y });
+}
+
 function createBBox({ x, y, width, height }) {
   if (![x, y, width, height].every(isFiniteNum)) {
     throw new ValidationError('BBox requires finite x, y, width, height', { x, y, width, height });
+  }
+  // Structural invariant (v2.md §5.6.2, §5.6.8 Layer 1, INV-44): a canonical
+  // BBox cannot hold negative dimensions. This is a construction-time structural
+  // rejection, not a QA severity or Review decision.
+  if (width < 0 || height < 0) {
+    throw new ValidationError('BBox width and height must be non-negative', { width, height });
   }
   return Object.freeze({ x, y, width, height });
 }
@@ -93,6 +110,7 @@ module.exports = {
   CoordinateSpace,
   GeometryType,
   SegmentationEncoding,
+  createPoint2D,
   createBBox,
   createPolygonRing,
   createSegmentationPolygon,

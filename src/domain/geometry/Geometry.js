@@ -126,6 +126,9 @@ function createSegmentationRle({ size, counts }) {
   if (typeof counts !== 'string' && !Array.isArray(counts)) {
     throw new ValidationError('RLE counts must be a string or a number array', { counts });
   }
+  if (Array.isArray(counts) && !counts.every((count) => typeof count === 'number')) {
+    throw new ValidationError('RLE counts array must contain only numbers', { counts });
+  }
   // RLE semantics are preserved as-is (INV-31). No decoding to a mask or to a
   // polygon happens here — that is Phase 3 rendering work.
   return Object.freeze({
@@ -148,8 +151,22 @@ function createGeometry({ type, bbox = null, segmentation = null }) {
     coordinateSpace: CoordinateSpace.IMAGE_PIXEL,
     type,
     bbox: bbox ? createBBox(bbox) : null,
-    segmentation: segmentation || null,
+    segmentation: canonicalizeSegmentation(segmentation),
   });
+}
+
+function canonicalizeSegmentation(segmentation) {
+  if (segmentation === null || segmentation === undefined) return null;
+  if (typeof segmentation !== 'object') {
+    throw new ValidationError('Segmentation must be an object', { segmentation });
+  }
+  if (segmentation.encoding === SegmentationEncoding.POLYGON) {
+    return createSegmentationPolygon(segmentation.polygons);
+  }
+  if (segmentation.encoding === SegmentationEncoding.RLE) {
+    return createSegmentationRle({ size: segmentation.size, counts: segmentation.counts });
+  }
+  throw new ValidationError('Unknown segmentation encoding', { encoding: segmentation.encoding });
 }
 
 module.exports = {

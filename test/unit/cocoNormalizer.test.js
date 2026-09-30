@@ -41,6 +41,7 @@ test('RLE segmentation preserved without decoding', () => {
   const a = normalize(dto, ctx).annotations[2];
   assert.strictEqual(a.geometry.segmentation.encoding, 'RLE');
   assert.strictEqual(a.geometry.segmentation.counts, 'X');
+  assert.ok(!('mask' in a.geometry.segmentation));
 });
 
 test('category name resolved, image id remapped, no review/QA fields present', () => {

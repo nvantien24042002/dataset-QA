@@ -23,6 +23,7 @@ const GeometryValidationStatus = Object.freeze({
 
 const GeometryIssueCode = Object.freeze({
   ZERO_AREA: 'ZERO_AREA',
+  INVALID_RLE: 'INVALID_RLE',
 });
 
 module.exports = {

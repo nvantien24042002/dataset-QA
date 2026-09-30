@@ -102,3 +102,19 @@ test('RLE numeric-array counts are preserved (not decoded)', () => {
   const s = createSegmentationRle({ size: [4, 4], counts: [1, 2, 3] });
   assert.deepStrictEqual([...s.counts], [1, 2, 3]);
 });
+
+test('RLE rejects arrays with non-number counts', () => {
+  assert.throws(() => createSegmentationRle({ size: [4, 4], counts: [1, '2'] }), /only numbers/);
+});
+
+test('RLE copies and freezes numeric counts and dimensions', () => {
+  const size = [4, 4];
+  const counts = [1, 15];
+  const s = createSegmentationRle({ size, counts });
+  size[0] = 9;
+  counts[0] = 9;
+  assert.deepStrictEqual([...s.size], [4, 4]);
+  assert.deepStrictEqual([...s.counts], [1, 15]);
+  assert.ok(Object.isFrozen(s.size));
+  assert.ok(Object.isFrozen(s.counts));
+});

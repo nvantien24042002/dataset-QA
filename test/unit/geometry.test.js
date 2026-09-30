@@ -41,3 +41,14 @@ test('RLE segmentation preserves counts/size and does not decode (INV-31)', () =
   assert.strictEqual(s.counts, 'abc');
   assert.deepStrictEqual([...s.size], [2, 2]);
 });
+
+test('createGeometry structurally canonicalizes supplied segmentations', () => {
+  const g = createGeometry({
+    type: GeometryType.SEGMENTATION,
+    segmentation: { encoding: 'RLE', size: [2, 2], counts: [1, 3] },
+  });
+  assert.deepStrictEqual([...g.segmentation.size], [2, 2]);
+  assert.deepStrictEqual([...g.segmentation.counts], [1, 3]);
+  assert.ok(Object.isFrozen(g.segmentation));
+  assert.throws(() => createGeometry({ type: GeometryType.SEGMENTATION, segmentation: { size: [2, 2], counts: [1, 3] } }), /encoding/);
+});

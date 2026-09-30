@@ -91,18 +91,11 @@ function createPolygon(rawPoints) {
   return Object.freeze(canonical);
 }
 
+// A segmentation ring IS a canonical Polygon (v2.md §5.6.4 -> §5.6.3): there is
+// exactly ONE Polygon contract. This is a backward-compatible alias that
+// delegates to createPolygon(); it retains no separate/lenient validation path.
 function createPolygonRing(points) {
-  if (!Array.isArray(points) || points.length === 0) {
-    throw new ValidationError('Polygon ring must be a non-empty array of points');
-  }
-  return Object.freeze(
-    points.map((p) => {
-      if (!isFiniteNum(p.x) || !isFiniteNum(p.y)) {
-        throw new ValidationError('Point2D requires finite x, y', p);
-      }
-      return Object.freeze({ x: p.x, y: p.y });
-    })
-  );
+  return createPolygon(points);
 }
 
 function createSegmentationPolygon(polygons) {
@@ -111,13 +104,24 @@ function createSegmentationPolygon(polygons) {
   }
   return Object.freeze({
     encoding: SegmentationEncoding.POLYGON,
-    polygons: Object.freeze(polygons.map(createPolygonRing)),
+    polygons: Object.freeze(polygons.map(createPolygon)),
   });
 }
 
 function createSegmentationRle({ size, counts }) {
   if (!Array.isArray(size) || size.length !== 2 || !size.every(isFiniteNum)) {
     throw new ValidationError('RLE size must be [height, width]', { size });
+  }
+  // Phase 3 structural requirement (v2.md §5.6.5): RLE dimensions MUST be
+  // positive (height > 0 AND width > 0). Non-positive dimensions are a
+  // structural violation rejected at construction (throw), not a validate()
+  // result. This does NOT decode counts; undecodable counts remain a runtime
+  // INVALID concern.
+  if (size[0] <= 0 || size[1] <= 0) {
+    throw new ValidationError('RLE dimensions must be positive (height > 0, width > 0)', {
+      height: size[0],
+      width: size[1],
+    });
   }
   if (typeof counts !== 'string' && !Array.isArray(counts)) {
     throw new ValidationError('RLE counts must be a string or a number array', { counts });

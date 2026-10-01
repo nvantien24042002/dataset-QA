@@ -7,6 +7,10 @@
 // This is an IMPORT GATE, distinct from the QA engine (Phase 4). It enforces
 // INV-07 (annotation.image_id resolves within the version) and rejects dangling
 // category references and duplicate ids before a version can become READY.
+// "Dangling" is defined once in ./references and shared with the QA reference
+// rules; this gate turns it into import error descriptors, never QA issues.
+
+const { hasDanglingImageReference, hasDanglingCategoryReference } = require('./references');
 
 function validateReferences(dataset) {
   const errors = [];
@@ -32,14 +36,14 @@ function validateReferences(dataset) {
     }
     annotationIds.add(annotation.id);
 
-    if (!imageIds.has(annotation.imageId)) {
+    if (hasDanglingImageReference(annotation, imageIds)) {
       errors.push({
         code: 'INVALID_IMAGE_REFERENCE',
         annotationId: annotation.id,
         imageId: annotation.imageId,
       });
     }
-    if (!categoryIds.has(annotation.categoryId)) {
+    if (hasDanglingCategoryReference(annotation, categoryIds)) {
       errors.push({
         code: 'INVALID_CATEGORY_REFERENCE',
         annotationId: annotation.id,

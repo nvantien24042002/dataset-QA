@@ -3,10 +3,11 @@
 // Canonical 2D geometry data structures (v2.md §5). Coordinates are in
 // IMAGE_PIXEL space with a top-left origin (INV-29).
 //
-// DATA ONLY. Geometric ALGORITHMS — area, perimeter, containsPoint,
-// self-intersection, isValid, RLE decoding/rendering — are Phase 3 and are
-// intentionally NOT implemented here. This module only defines and shape-checks
-// the structures the canonical Annotation needs.
+// DATA + construction-time structural guards only. Geometric ALGORITHMS — area,
+// perimeter, self-intersection, semantic validation, RLE decoding — live in the
+// sibling modules (bbox.js, polygon.js, rle.js, validateGeometry.js), not here.
+// This module defines and shape-checks the structures the canonical Annotation
+// needs and rejects structurally invalid data at construction (INV-44).
 
 const { ValidationError } = require('../errors');
 
@@ -146,6 +147,29 @@ function createSegmentationRle({ size, counts }) {
 function createGeometry({ type, bbox = null, segmentation = null }) {
   if (!Object.values(GeometryType).includes(type)) {
     throw new ValidationError('Unknown geometry type', { type });
+  }
+  // Type/content invariants (v2.md §5.6.8 Layer 1, INV-44). A canonical Geometry
+  // cannot exist with a type that has no backing data.
+  //   - BBOX requires a bbox.
+  //   - SEGMENTATION requires a segmentation (a bbox MAY also be present — COCO
+  //     annotations commonly carry both, stored in separate columns per §14.3).
+  //   - POLYGON is RESERVED and NOT constructible: the single canonical polygon
+  //     storage is segmentation.encoding = POLYGON (§5.6.4), so there is no
+  //     top-level polygon field to populate.
+  if (type === GeometryType.POLYGON) {
+    throw new ValidationError(
+      'GeometryType.POLYGON is reserved and not constructible; use SEGMENTATION with encoding POLYGON',
+      { type }
+    );
+  }
+  if (type === GeometryType.BBOX && !bbox) {
+    throw new ValidationError('BBOX geometry requires a bbox', { type });
+  }
+  if (type === GeometryType.SEGMENTATION && !segmentation) {
+    throw new ValidationError('SEGMENTATION geometry requires a segmentation', { type });
+  }
+  if (!bbox && !segmentation) {
+    throw new ValidationError('Geometry requires a bbox or a segmentation', { type });
   }
   return Object.freeze({
     coordinateSpace: CoordinateSpace.IMAGE_PIXEL,

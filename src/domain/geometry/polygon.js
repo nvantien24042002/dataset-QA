@@ -16,9 +16,10 @@
 // sound. Semantic validation therefore yields only VALID or DEGENERATE
 // (INV-45) and never throws.
 //
-// Polygon topology (self-intersection / hasSelfIntersection) is Phase 3 Step 3
-// and is intentionally NOT implemented here. No QA severity, review decision,
-// or image dimensions appear in this module (INV-43).
+// Polygon topology (self-intersection / hasSelfIntersection) is implemented
+// below and is consumed by validatePolygon() as a DEGENERATE semantic signal.
+// No QA severity, review decision, or image dimensions appear in this module
+// (INV-43).
 
 const { GeometryValidationStatus, GeometryIssueCode } = require('./validation');
 
@@ -64,16 +65,48 @@ function polygonPerimeter(points) {
   return total;
 }
 
+// Are all vertices collinear (lie on a single straight line)? A genuinely
+// collinear polygon has zero area; this distinguishes it from a self-crossing
+// polygon that also sums to zero shoelace area (e.g. a symmetric bow-tie), which
+// is NOT collinear. With n >= 3 distinct points guaranteed by construction, the
+// polygon is collinear iff every vertex is collinear with the first edge.
+function isCollinear(points) {
+  const a = points[0];
+  let b = null;
+  for (let i = 1; i < points.length; i += 1) {
+    if (points[i].x !== a.x || points[i].y !== a.y) {
+      b = points[i];
+      break;
+    }
+  }
+  if (b === null) return true;
+  for (const c of points) {
+    if (orientation(a, b, c) !== 0) return false;
+  }
+  return true;
+}
+
 // Semantic validation of an already-constructed canonical Polygon (v2.md
 // §5.6.3, §5.6.6). Returns a GeometryValidationResult { status, issues } and
-// never throws. Zero-area (collinear) => DEGENERATE with a ZERO_AREA issue;
-// otherwise VALID. Structurally malformed polygons cannot reach this function —
-// they are rejected by createPolygon() (INV-44).
+// never throws. Two semantic degeneracies drive DEGENERATE:
+//   - genuine collinearity (all vertices on one line) => ZERO_AREA;
+//   - self-intersection on non-adjacent edges => SELF_INTERSECTION. This also
+//     covers the symmetric bow-tie, whose shoelace area is 0 but which is NOT
+//     collinear, so it is reported as SELF_INTERSECTION rather than ZERO_AREA.
+// Otherwise VALID. Structurally malformed polygons cannot reach this function —
+// they are rejected by createPolygon() (INV-44), so INVALID is never returned.
 function validatePolygon(points) {
-  if (polygonArea(points) === 0) {
+  const issues = [];
+  if (isCollinear(points)) {
+    issues.push(Object.freeze({ code: GeometryIssueCode.ZERO_AREA }));
+  }
+  if (hasSelfIntersection(points)) {
+    issues.push(Object.freeze({ code: GeometryIssueCode.SELF_INTERSECTION }));
+  }
+  if (issues.length > 0) {
     return Object.freeze({
       status: GeometryValidationStatus.DEGENERATE,
-      issues: Object.freeze([Object.freeze({ code: GeometryIssueCode.ZERO_AREA })]),
+      issues: Object.freeze(issues),
     });
   }
   return Object.freeze({

@@ -274,11 +274,26 @@ test('triangle closing edge adjacency is not self-intersection', () => {
   assert.strictEqual(hasSelfIntersection(createPolygon([P(1, 1), P(5, 1), P(3, 6)])), false);
 });
 
-// Topology is a pure fact and does NOT change semantic validation: a
-// self-intersecting but non-zero-area polygon still validates as VALID here
-// (SELF_INTERSECTION integration is deferred to a later step).
-test('hasSelfIntersection does not alter validatePolygon status', () => {
+// Self-intersection is a DEGENERATE semantic signal (v2.md §5.6.6): a
+// self-intersecting polygon validates as DEGENERATE with a SELF_INTERSECTION
+// issue, never INVALID (INV-45/46). Topology still never changes construction.
+test('hasSelfIntersection drives validatePolygon to DEGENERATE/SELF_INTERSECTION', () => {
   const bowtie = createPolygon([P(0, 0), P(4, 4), P(4, 0), P(0, 4)]);
   assert.strictEqual(hasSelfIntersection(bowtie), true);
-  assert.notStrictEqual(validatePolygon(bowtie).status, GeometryValidationStatus.INVALID);
+  const r = validatePolygon(bowtie);
+  assert.strictEqual(r.status, GeometryValidationStatus.DEGENERATE);
+  assert.ok(r.issues.some((i) => i.code === GeometryIssueCode.SELF_INTERSECTION));
+  assert.notStrictEqual(r.status, GeometryValidationStatus.INVALID);
+});
+
+// A symmetric bow-tie has zero shoelace area but is NOT collinear, so it must be
+// reported as SELF_INTERSECTION, never ZERO_AREA (v2.md §5.6.3 reserves ZERO_AREA
+// for genuine collinear degeneracy).
+test('symmetric bow-tie is SELF_INTERSECTION, not ZERO_AREA', () => {
+  const bowtie = createPolygon([P(0, 0), P(2, 2), P(2, 0), P(0, 2)]);
+  const r = validatePolygon(bowtie);
+  assert.strictEqual(r.status, GeometryValidationStatus.DEGENERATE);
+  const codes = r.issues.map((i) => i.code);
+  assert.ok(codes.includes(GeometryIssueCode.SELF_INTERSECTION));
+  assert.ok(!codes.includes(GeometryIssueCode.ZERO_AREA));
 });

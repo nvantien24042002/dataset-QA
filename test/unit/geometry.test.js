@@ -52,3 +52,44 @@ test('createGeometry structurally canonicalizes supplied segmentations', () => {
   assert.ok(Object.isFrozen(g.segmentation));
   assert.throws(() => createGeometry({ type: GeometryType.SEGMENTATION, segmentation: { size: [2, 2], counts: [1, 3] } }), /encoding/);
 });
+
+// --- createGeometry type/content invariants (v2.md §5.6.8 Layer 1, INV-44) ---
+
+test('createGeometry BBOX without a bbox throws', () => {
+  assert.throws(() => createGeometry({ type: GeometryType.BBOX }), /BBOX geometry requires a bbox/);
+});
+
+test('createGeometry SEGMENTATION without a segmentation throws', () => {
+  assert.throws(
+    () => createGeometry({ type: GeometryType.SEGMENTATION }),
+    /SEGMENTATION geometry requires a segmentation/
+  );
+});
+
+test('createGeometry POLYGON is reserved and not constructible', () => {
+  assert.throws(
+    () => createGeometry({
+      type: GeometryType.POLYGON,
+      segmentation: { encoding: 'POLYGON', polygons: [[{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 3 }]] },
+    }),
+    /reserved and not constructible/
+  );
+});
+
+test('createGeometry with neither bbox nor segmentation throws', () => {
+  assert.throws(
+    () => createGeometry({ type: GeometryType.BBOX, bbox: null, segmentation: null }),
+    /requires a bbox/
+  );
+});
+
+test('createGeometry SEGMENTATION may carry both bbox and segmentation (COCO style)', () => {
+  const g = createGeometry({
+    type: GeometryType.SEGMENTATION,
+    bbox: { x: 0, y: 0, width: 4, height: 2 },
+    segmentation: { encoding: 'RLE', size: [2, 2], counts: [1, 3] },
+  });
+  assert.strictEqual(g.type, GeometryType.SEGMENTATION);
+  assert.deepStrictEqual({ ...g.bbox }, { x: 0, y: 0, width: 4, height: 2 });
+  assert.strictEqual(g.segmentation.encoding, 'RLE');
+});

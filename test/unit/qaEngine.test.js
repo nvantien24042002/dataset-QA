@@ -55,10 +55,11 @@ test('a fully valid view yields no issues and empty invalid sets', () => {
   assert.strictEqual(r.summary.totalIssues, 0);
 });
 
-// 2. Dangling image
+// 2. Dangling image. The lone image is left with no attached annotation, so
+// MISSING_ANNOTATION (dataset block, appended last) also fires.
 test('dangling image → INVALID_IMAGE_REFERENCE in the image set only', () => {
   const r = runQaEngine(view({ annotations: [viewAnn({ rawImageId: 999, canonicalImageId: null, canonicalId: null })] }));
-  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_REFERENCE']);
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_REFERENCE', 'MISSING_ANNOTATION']);
   assert.ok(r.invalidSets.invalidImageReferenceAnnotationIds.has(100));
   assert.ok(!r.invalidSets.invalidCategoryReferenceAnnotationIds.has(100));
 });
@@ -87,10 +88,11 @@ test('bad bbox + segmentation → INVALID_BBOX reported from the original raw bb
   assert.deepStrictEqual(r.issues[0].details.bbox, [1, 2, -5, 4]);
 });
 
-// 6. Invalid image dimensions
+// 6. Invalid image dimensions. The image has no annotation, so MISSING_ANNOTATION
+// (dataset block) also fires.
 test('invalid image dimensions → INVALID_IMAGE_DIMENSION, raw image id in the dimension set', () => {
   const r = runQaEngine(view({ images: [viewImg({ width: 0 })], annotations: [] }));
-  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION']);
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION', 'MISSING_ANNOTATION']);
   assert.ok(r.invalidSets.invalidDimensionImageIds.has(1));
 });
 
@@ -131,12 +133,15 @@ test('all four rules execute and concatenate in registry order', () => {
       categoryIds: new Set([5]),
     })
   );
-  // Order: image-ref, category-ref, bbox, dimension.
+  // Order: record block (image-ref, category-ref, bbox, dimension) then the
+  // dataset block. Image 2 (dimension-invalid) has no attached annotation, so
+  // MISSING_ANNOTATION fires for it.
   assert.deepStrictEqual(types(r), [
     'INVALID_IMAGE_REFERENCE',
     'INVALID_CATEGORY_REFERENCE',
     'INVALID_BBOX',
     'INVALID_IMAGE_DIMENSION',
+    'MISSING_ANNOTATION',
   ]);
 });
 
@@ -255,7 +260,7 @@ test('records that have no canonical row are still inspected by the rules', () =
 
 // 18. The engine orchestrates only domain QA modules (no parser/normalizer/
 // persistence/application). Structural check on the source.
-test('runQaEngine imports only QA vocabulary, record rules, eligibility, and geometric rules', () => {
+test('runQaEngine imports only QA vocabulary, record rules, eligibility, geometric and dataset rules', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '../../src/domain/qa/runQaEngine.js'), 'utf8');
@@ -263,6 +268,7 @@ test('runQaEngine imports only QA vocabulary, record rules, eligibility, and geo
   assert.deepStrictEqual(requires.sort(), [
     './QAVocabulary',
     './geometryEligibility',
+    './rules/datasetRules',
     './rules/geometricRules',
     './rules/recordRules',
   ]);
@@ -310,12 +316,14 @@ test('wiring: a category-reference-invalid annotation is still evaluated geometr
   assert.deepStrictEqual(types(r), ['INVALID_CATEGORY_REFERENCE', 'SMALL_OBJECT']);
 });
 
-// G. Image-reference-invalid annotation gets no geometric descriptor.
+// G. Image-reference-invalid annotation gets no geometric descriptor. The image
+// has no attached annotation (the only one is dangling), so MISSING_ANNOTATION
+// also fires.
 test('wiring: a dangling-image annotation is excluded from geometry', () => {
   const r = runQaEngine(
     view({ annotations: [viewAnn({ rawImageId: 999, canonicalImageId: null, canonicalId: null, bbox: [0, 0, 8, 8] })] })
   );
-  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_REFERENCE']); // no SMALL_OBJECT/TRUNCATED/OOB
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_REFERENCE', 'MISSING_ANNOTATION']); // no geometry
 });
 
 // H. Invalid-bbox annotation gets no geometric descriptor.
@@ -350,8 +358,9 @@ test('wiring: a dimension-invalid image does not suppress annotations on a valid
       imageIds: new Set([1, 2]),
     })
   );
-  // image 2 → INVALID_IMAGE_DIMENSION; annotation on image 1 → SMALL_OBJECT.
-  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION', 'SMALL_OBJECT']);
+  // image 2 → INVALID_IMAGE_DIMENSION; annotation on image 1 → SMALL_OBJECT;
+  // image 2 has no attached annotation → MISSING_ANNOTATION (dataset block).
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION', 'SMALL_OBJECT', 'MISSING_ANNOTATION']);
 });
 
 // K. Null bbox → no geometric descriptor; record issues remain.
@@ -401,13 +410,15 @@ test('wiring: record-level issues are unchanged (regression)', () => {
       imageIds: new Set([1, 2]),
     })
   );
-  // Record block exactly as before geometric wiring (fixtures are geometrically
-  // clean / ineligible), so no geometric descriptor is appended.
+  // Record block unchanged by wiring. Image 2 (dimension-invalid) has no attached
+  // annotation, so the dataset block appends MISSING_ANNOTATION; the four record
+  // issues themselves are unchanged.
   assert.deepStrictEqual(types(r), [
     'INVALID_IMAGE_REFERENCE',
     'INVALID_CATEGORY_REFERENCE',
     'INVALID_BBOX',
     'INVALID_IMAGE_DIMENSION',
+    'MISSING_ANNOTATION',
   ]);
 });
 
@@ -458,4 +469,154 @@ test('wiring: an empty view yields no issues and a complete zero-count summary',
   assert.strictEqual(Object.keys(r.summary.issueTypeCounts).length, 9);
   assert.strictEqual(Object.keys(r.summary.severityCounts).length, 4);
   assert.ok(Object.values(r.summary.issueTypeCounts).every((n) => n === 0));
+});
+
+// --- Dataset-level wiring (MISSING_ANNOTATION + CLASS_IMBALANCE through the engine) ---
+
+const CATS = [{ rawId: 1, name: 'car' }, { rawId: 2, name: 'person' }];
+// A view whose categoryIds match the supplied category rawIds, so the record
+// category-reference rule does not flag these annotations as dangling (that would
+// wrongly exclude them from CLASS_IMBALANCE). Images default to one 640x480.
+const classView = (annotations, categoryRawIds, images) => ({
+  images: images || [viewImg()],
+  annotations,
+  imageIds: new Set((images || [viewImg()]).map((i) => i.rawId)),
+  categoryIds: new Set(categoryRawIds),
+});
+// N annotations on image 1 for a given categoryId, all with a clean centered bbox
+// so no geometric issue fires.
+const classAnns = (spec) => {
+  let id = 0;
+  const out = [];
+  for (const [categoryId, n] of spec) {
+    for (let i = 0; i < n; i += 1) {
+      out.push(viewAnn({ rawId: (id += 1), categoryId, bbox: [100, 100, 50, 50] }));
+    }
+  }
+  return out;
+};
+
+// T. MISSING_ANNOTATION fires through the engine for an empty image.
+test('dataset wiring: an empty image produces MISSING_ANNOTATION (INFO)', () => {
+  const r = runQaEngine(
+    view({
+      images: [viewImg({ rawId: 1, canonicalId: 'v::img::1' }), viewImg({ rawId: 2, canonicalId: 'v::img::2' })],
+      annotations: [viewAnn({ rawImageId: 1, canonicalImageId: 'v::img::1' })],
+    })
+  );
+  const missing = r.issues.filter((i) => i.type === 'MISSING_ANNOTATION');
+  assert.strictEqual(missing.length, 1);
+  assert.strictEqual(missing[0].imageId, 2);
+  assert.strictEqual(missing[0].severity, 'INFO');
+});
+
+// U. An invalid-bbox annotation still counts as attached (no MISSING_ANNOTATION).
+test('dataset wiring: an invalid-bbox annotation still attaches (no MISSING_ANNOTATION)', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [0, 0, -5, 8] })] }));
+  assert.ok(!types(r).includes('MISSING_ANNOTATION')); // the image has an attached annotation
+  assert.ok(types(r).includes('INVALID_BBOX'));
+});
+
+// V. An invalid-category annotation still counts as attached (no MISSING_ANNOTATION).
+test('dataset wiring: an invalid-category annotation still attaches (no MISSING_ANNOTATION)', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ categoryId: 777 })] }), { categories: CATS });
+  assert.ok(!types(r).includes('MISSING_ANNOTATION'));
+  assert.ok(types(r).includes('INVALID_CATEGORY_REFERENCE'));
+});
+
+// W. runQaEngine(view) with no categories emits no CLASS_IMBALANCE.
+test('dataset wiring: no categories option → no CLASS_IMBALANCE (backward compatible)', () => {
+  const r = runQaEngine(classView(classAnns([[1, 9], [2, 1]]), [1, 2])); // car 90%, no categories option
+  assert.ok(!types(r).includes('CLASS_IMBALANCE'));
+});
+
+// X. CLASS_IMBALANCE thresholds through the engine.
+test('dataset wiring: <=30% emits no CLASS_IMBALANCE', () => {
+  const cats = [{ rawId: 1, name: 'car' }, { rawId: 2, name: 'person' }, { rawId: 3, name: 'dog' }, { rawId: 4, name: 'cat' }];
+  const r = runQaEngine(
+    classView(classAnns([[1, 3], [2, 3], [3, 3], [4, 1]]), [1, 2, 3, 4]), // max 30%
+    { categories: cats }
+  );
+  assert.ok(!types(r).includes('CLASS_IMBALANCE'));
+});
+
+test('dataset wiring: >30% and <=50% emits MEDIUM CLASS_IMBALANCE', () => {
+  const r = runQaEngine(classView(classAnns([[1, 5], [2, 5]]), [1, 2]), { categories: CATS }); // 50%
+  const imbalance = r.issues.find((i) => i.type === 'CLASS_IMBALANCE');
+  assert.strictEqual(imbalance.severity, 'MEDIUM');
+  assert.strictEqual(imbalance.categoryId, 1); // raw winning id
+  assert.strictEqual(imbalance.details.largestClass, 'car'); // name preserved
+});
+
+test('dataset wiring: >50% emits HIGH CLASS_IMBALANCE', () => {
+  const r = runQaEngine(classView(classAnns([[1, 6], [2, 4]]), [1, 2]), { categories: CATS }); // 60%
+  const imbalance = r.issues.find((i) => i.type === 'CLASS_IMBALANCE');
+  assert.strictEqual(imbalance.severity, 'HIGH');
+});
+
+// Y. Invalid-category annotations are excluded via the engine's own invalidSets.
+test('dataset wiring: invalid-category annotations are excluded from CLASS_IMBALANCE via engine invalidSets', () => {
+  // 6 car refs point at category_id 999 (unknown) → both INVALID_CATEGORY_REFERENCE
+  // and excluded from the distribution, leaving person as the only valid class at
+  // 100%. categoryIds carries only the valid ids {1,2}, so 999 is dangling.
+  const annotations = [
+    ...Array.from({ length: 6 }, (_, i) => viewAnn({ rawId: `c${i}`, categoryId: 999, bbox: [100, 100, 50, 50] })),
+    ...Array.from({ length: 4 }, (_, i) => viewAnn({ rawId: `p${i}`, categoryId: 2, bbox: [100, 100, 50, 50] })),
+  ];
+  const r = runQaEngine(classView(annotations, [1, 2]), { categories: CATS });
+  const imbalance = r.issues.find((i) => i.type === 'CLASS_IMBALANCE');
+  assert.strictEqual(imbalance.categoryId, 2); // person, not the excluded car refs
+  assert.strictEqual(imbalance.details.largestClassPercentage, 100);
+  // And those excluded annotations surfaced as INVALID_CATEGORY_REFERENCE.
+  assert.strictEqual(r.issues.filter((i) => i.type === 'INVALID_CATEGORY_REFERENCE').length, 6);
+});
+
+// Z. At most one CLASS_IMBALANCE, no LOW.
+test('dataset wiring: at most one CLASS_IMBALANCE issue and never LOW', () => {
+  const r = runQaEngine(classView(classAnns([[1, 8], [2, 2]]), [1, 2]), { categories: CATS });
+  assert.strictEqual(r.issues.filter((i) => i.type === 'CLASS_IMBALANCE').length, 1);
+  assert.strictEqual(r.summary.severityCounts.LOW, 0);
+});
+
+// AA. MISSING_ANNOTATION and CLASS_IMBALANCE fire independently and coexist with
+// record/geometric issues; summary counts both; order is record → geometric →
+// dataset (MISSING_ANNOTATION before CLASS_IMBALANCE).
+test('dataset wiring: both dataset rules coexist with record/geometric issues in deterministic order', () => {
+  const r = runQaEngine(
+    classView(
+      [
+        // image 1: 8 car (one tiny → SMALL_OBJECT) + 2 person → car 80% HIGH imbalance
+        viewAnn({ rawId: 1, rawImageId: 1, canonicalImageId: 'v::img::1', categoryId: 1, bbox: [100, 100, 8, 8] }),
+        ...classAnns([[1, 7], [2, 2]]).map((a, i) => ({ ...a, rawId: 100 + i })),
+      ],
+      [1, 2],
+      [viewImg({ rawId: 1, canonicalId: 'v::img::1' }), viewImg({ rawId: 2, canonicalId: 'v::img::2' })]
+    ),
+    { categories: CATS }
+  );
+  // image 2 is empty → MISSING_ANNOTATION; order: geometric SMALL_OBJECT, then
+  // dataset MISSING_ANNOTATION, then CLASS_IMBALANCE.
+  assert.deepStrictEqual(types(r), ['SMALL_OBJECT', 'MISSING_ANNOTATION', 'CLASS_IMBALANCE']);
+  assert.strictEqual(r.summary.issueTypeCounts.SMALL_OBJECT, 1);
+  assert.strictEqual(r.summary.issueTypeCounts.MISSING_ANNOTATION, 1);
+  assert.strictEqual(r.summary.issueTypeCounts.CLASS_IMBALANCE, 1);
+  assert.strictEqual(r.summary.severityCounts.INFO, 1); // the MISSING_ANNOTATION
+});
+
+// BB. MISSING_ANNOTATION increments severityCounts.INFO; all keys stay present.
+test('dataset wiring: MISSING_ANNOTATION increments INFO and keeps full summary shape', () => {
+  const r = runQaEngine(view({ images: [viewImg()], annotations: [] }));
+  assert.strictEqual(r.summary.issueTypeCounts.MISSING_ANNOTATION, 1);
+  assert.strictEqual(r.summary.severityCounts.INFO, 1);
+  assert.strictEqual(Object.keys(r.summary.issueTypeCounts).length, 9);
+  assert.strictEqual(Object.keys(r.summary.severityCounts).length, 4);
+});
+
+// CC. Determinism across repeated runs with categories supplied.
+test('dataset wiring: repeated runs with categories are deterministic', () => {
+  const v = classView(classAnns([[1, 5], [2, 5]]), [1, 2]);
+  const a = runQaEngine(v, { categories: CATS });
+  const b = runQaEngine(v, { categories: CATS });
+  assert.deepStrictEqual(types(a), types(b));
+  assert.deepStrictEqual(a.summary, b.summary);
 });

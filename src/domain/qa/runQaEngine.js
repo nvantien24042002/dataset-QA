@@ -1,25 +1,28 @@
 'use strict';
 
-// QA Engine — record + geometric rule orchestrator (Phase 4 Step 3B-3 record
-// rules; geometric wiring; v1.md §10, §11, §13, §14, §15, §16, §16B, §17, §19.4,
-// §29.2). Pure domain: no I/O, no persistence, no QAIssue construction. Runs the
-// four record-level rules, then the three geometric rules over the annotations
-// that survive geometry eligibility, concatenates all descriptors, exposes the
-// four primitive invalid sets, and builds a deterministic summary.
+// QA Engine — record + geometric + dataset-level rule orchestrator (Phase 4;
+// v1.md §8, §9, §10, §11, §12, §13, §14, §15, §16, §16B, §17, §19.4, §29.2).
+// Pure domain: no I/O, no persistence, no QAIssue construction. Runs the four
+// record-level rules, then the three geometric rules over the annotations that
+// survive geometry eligibility, then the two dataset-level rules, concatenates
+// all descriptors, exposes the four primitive invalid sets, and builds a
+// deterministic summary.
 //
 // Execution order (v1.md §29.2): record-level (step 2) before geometric
-// (step 3). Geometric rules run ONLY for annotations that passed geometry
-// eligibility (valid image reference, valid dimensions, valid bbox); a
-// category-reference-invalid annotation is still eligible (v1.md §14). The
-// MISSING_ANNOTATION / CLASS_IMBALANCE dataset rules, the risk engine, and
+// (step 3); the dataset-level rules (MISSING_ANNOTATION, CLASS_IMBALANCE) are
+// order-independent and are appended last for a deterministic issue order.
+// Geometric rules run ONLY for annotations that passed geometry eligibility
+// (valid image reference, valid dimensions, valid bbox); a category-reference-
+// invalid annotation is still eligible (v1.md §14). The risk engine and
 // persistence remain later steps.
 //
 // ID policy: the record rules apply the single §6.4 normalizeId policy
-// internally and geometry eligibility bridges dimension suppression through the
-// view's canonicalImageId; this engine introduces NO second normalization and
-// constructs no canonical ids. Descriptors stay raw-id based (no id/qaRunId/
-// createdAt); raw->canonical mapping and QAIssue materialization belong to the
-// persistence step.
+// internally, geometry eligibility bridges dimension suppression through the
+// view's canonicalImageId, and CLASS_IMBALANCE groups categories with that same
+// normalizeId; this engine introduces NO second normalization and constructs no
+// canonical ids. Descriptors stay raw-id based (no id/qaRunId/createdAt);
+// raw->canonical mapping and QAIssue materialization belong to the persistence
+// step.
 
 const { QAIssueType, QASeverity } = require('./QAVocabulary');
 const {
@@ -34,6 +37,7 @@ const {
   checkTruncatedObjects,
   checkOutOfBoundsBboxes,
 } = require('./rules/geometricRules');
+const { checkMissingAnnotations, checkClassImbalance } = require('./rules/datasetRules');
 
 // QADatasetView -> Step 2 RuleInput. Field RENAME ONLY: raw values pass through
 // untouched (including the original raw bbox), no normalization, no canonical-id
@@ -82,10 +86,12 @@ function buildSummary(issues) {
   });
 }
 
-// Run the four record-level rules then the three geometric rules in a fixed
-// deterministic order (v1.md §29.2: record step 2 before geometric step 3) and
-// aggregate.
-function runQaEngine(view) {
+// Run the record-level rules, then the geometric rules over the eligible subset,
+// then the dataset-level rules, in a fixed deterministic order (v1.md §29.2) and
+// aggregate. `categories` is plain QA metadata [{ rawId, name }] for
+// CLASS_IMBALANCE; it defaults to [] so runQaEngine(view) stays valid and simply
+// emits no CLASS_IMBALANCE (no category resolves).
+function runQaEngine(view, { categories = [] } = {}) {
   const { annotations, images } = toRuleInput(view);
 
   // --- Record-level phase (step 2) ---
@@ -120,8 +126,19 @@ function runQaEngine(view) {
   const truncated = checkTruncatedObjects(eligibleAnnotations, view.images);
   const outOfBounds = checkOutOfBoundsBboxes(eligibleAnnotations, view.images);
 
-  // Deterministic order: record block (image-ref, category-ref, bbox, dimension)
-  // then geometric block (small, truncated, out-of-bounds). No deduplication.
+  // --- Dataset-level phase ---
+  // MISSING_ANNOTATION counts attachment by resolved image identity (independent
+  // of bbox/category validity). CLASS_IMBALANCE is fed the engine's OWN
+  // category-reference-invalid set (never reconstructed by the caller) plus the
+  // supplied category metadata; it emits at most one issue.
+  const missing = checkMissingAnnotations(view);
+  const imbalance = checkClassImbalance(view, {
+    invalidCategoryAnnotationIds: invalidSets.invalidCategoryReferenceAnnotationIds,
+    categories,
+  });
+
+  // Deterministic order: record block, then geometric block, then dataset block
+  // (MISSING_ANNOTATION before CLASS_IMBALANCE). No deduplication.
   const issues = [
     ...imageRefs.issues,
     ...categoryRefs.issues,
@@ -130,6 +147,8 @@ function runQaEngine(view) {
     ...smallObjects.issues,
     ...truncated.issues,
     ...outOfBounds.issues,
+    ...missing.issues,
+    ...imbalance.issues,
   ];
 
   return Object.freeze({

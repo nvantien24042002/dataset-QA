@@ -8,6 +8,7 @@ const { createImage } = require('../../domain/dataset/Image');
 const { createCategory } = require('../../domain/dataset/Category');
 const { createAnnotation } = require('../../domain/annotation/Annotation');
 const { assertSafeRelativePath } = require('../../domain/dataset/pathSafety');
+const { normalizeId } = require('../../domain/dataset/references');
 const {
   GeometryType,
   createGeometry,
@@ -54,12 +55,19 @@ function normalizeSegmentation(seg) {
  * @returns {CanonicalDataset}
  */
 function normalize(dto, { makeImageId, makeAnnotationId, imageHashes = new Map() }) {
-  const categoryNameById = new Map(dto.categories.map((c) => [c.id, c.name]));
+  // Image/category references match by the shared §6.4 id-normalization policy
+  // (normalizeId), so image.id = 1 resolves annotation.image_id = "1". The maps
+  // are keyed by the NORMALIZED id, and lookups normalize the reference the same
+  // way — the same semantics recordInspection and the Step 2 QA rules use. This
+  // keeps the import boundary consistent: a reference that recordInspection kept
+  // as resolvable must resolve here too, instead of leaking a sentinel into
+  // persistence (FK failure).
+  const categoryNameById = new Map(dto.categories.map((c) => [normalizeId(c.id), c.name]));
 
   const imageIdMap = new Map();
   const images = dto.images.map((img) => {
     const canonicalId = makeImageId(img.id);
-    imageIdMap.set(img.id, canonicalId);
+    imageIdMap.set(normalizeId(img.id), canonicalId);
     // Reject traversal/absolute file names at the import boundary before the
     // path is ever used to build a storage location (INV-08, path-safety).
     const safeFileName = assertSafeRelativePath(img.file_name, 'file_name');
@@ -84,13 +92,16 @@ function normalize(dto, { makeImageId, makeAnnotationId, imageHashes = new Map()
       throw new ValidationError('Annotation has neither bbox nor segmentation', { id: a.id });
     }
     const type = segmentation ? GeometryType.SEGMENTATION : GeometryType.BBOX;
+    const normImageId = normalizeId(a.image_id);
+    const normCategoryId = normalizeId(a.category_id);
     return createAnnotation({
       id: makeAnnotationId(a.id),
       // A dangling image_id becomes a sentinel so reference validation can
-      // report INVALID_IMAGE_REFERENCE rather than crashing normalization.
-      imageId: imageIdMap.has(a.image_id) ? imageIdMap.get(a.image_id) : MISSING_IMAGE_REF(a.image_id),
+      // report INVALID_IMAGE_REFERENCE rather than crashing normalization. The
+      // sentinel keeps the ORIGINAL image_id for human traceability.
+      imageId: imageIdMap.has(normImageId) ? imageIdMap.get(normImageId) : MISSING_IMAGE_REF(a.image_id),
       categoryId: a.category_id,
-      categoryName: categoryNameById.get(a.category_id) ?? null,
+      categoryName: categoryNameById.has(normCategoryId) ? categoryNameById.get(normCategoryId) : null,
       geometry: createGeometry({
         type,
         bbox: bbox ? { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height } : null,

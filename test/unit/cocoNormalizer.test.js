@@ -58,3 +58,37 @@ test('canonical image carries content fingerprint and relative path', () => {
   assert.strictEqual(image.fingerprint, 'hash1');
   assert.strictEqual(image.relativePath, 'images/a.png');
 });
+
+// Phase 4 Step 3B-1 (H1 fix): references resolve by the shared §6.4
+// normalizeId policy, so a numeric image.id matches a string image_id.
+test('image reference resolves across numeric/string id forms (§6.4) — no sentinel', () => {
+  const mixed = {
+    images: [{ id: 1, file_name: 'a.png', width: 10, height: 20 }],
+    categories: [{ id: 5, name: 'car' }],
+    annotations: [{ id: 100, image_id: '1', category_id: '5', bbox: [1, 2, 3, 4] }],
+  };
+  const a = normalize(mixed, ctx).annotations[0];
+  assert.strictEqual(a.imageId, 'img-1'); // real canonical id, not __MISSING_IMAGE__
+  assert.ok(!a.imageId.startsWith('__MISSING_IMAGE__'));
+  assert.strictEqual(a.categoryName, 'car'); // category name resolved across "5" vs 5
+});
+
+test('a truly dangling image_id still becomes the missing-image sentinel with the original id', () => {
+  const mixed = {
+    images: [{ id: 1, file_name: 'a.png', width: 10, height: 20 }],
+    categories: [{ id: 5, name: 'car' }],
+    annotations: [{ id: 100, image_id: 999, category_id: 5, bbox: [1, 2, 3, 4] }],
+  };
+  const a = normalize(mixed, ctx).annotations[0];
+  assert.strictEqual(a.imageId, '__MISSING_IMAGE__::999');
+});
+
+test('a non-numeric image_id does not accidentally match a numeric image.id', () => {
+  const mixed = {
+    images: [{ id: 1, file_name: 'a.png', width: 10, height: 20 }],
+    categories: [{ id: 5, name: 'car' }],
+    annotations: [{ id: 100, image_id: 'abc', category_id: 5, bbox: [1, 2, 3, 4] }],
+  };
+  const a = normalize(mixed, ctx).annotations[0];
+  assert.strictEqual(a.imageId, '__MISSING_IMAGE__::abc');
+});

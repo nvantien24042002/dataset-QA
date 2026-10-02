@@ -19,6 +19,12 @@ const crypto = require('crypto');
 const { VersionStatus } = require('../../domain/version/VersionStatus');
 const { ValidationError } = require('../../domain/errors');
 const { assertWithinDir } = require('../../domain/dataset/pathSafety');
+const { inspectRecords } = require('./recordInspection');
+
+// Reference defects are record-level QA concerns (v1.md §13, §14), NOT fatal
+// import errors (Option 1, Phase 4). They are filtered out of the fatal set and
+// left for the QA engine. Duplicate-id and all other codes stay fatal.
+const QA_REFERENCE_CODES = new Set(['INVALID_IMAGE_REFERENCE', 'INVALID_CATEGORY_REFERENCE']);
 
 class ImportDatasetService {
   constructor(deps) {
@@ -44,6 +50,14 @@ class ImportDatasetService {
 
     const now = this.clock();
     const dto = this.coco.parse(source.readAnnotations());
+
+    // Record-level QA boundary (Option 1, Phase 4). Partition the raw DTO up
+    // front: a dangling-image or unbuildable-bbox record is held back so the
+    // strict normalizer never sees it (canonical geometry stays malformed-free),
+    // and value-invalid declared dimensions are noted. The excluded records and
+    // defect sets are the hook the future runQaEngine consumes; this step
+    // neither builds QAIssues nor persists them yet.
+    const qaBoundary = inspectRecords(dto);
 
     // Validate image files + dimensions; hash bytes; cache buffers for staging.
     const errors = [];
@@ -74,6 +88,10 @@ class ImportDatasetService {
         errors.push({ code: 'UNREADABLE_IMAGE', imageId: img.id, fileName: img.file_name, message: e.message });
         continue;
       }
+      // A value-invalid declared dimension is a record-level QA concern
+      // (INVALID_IMAGE_DIMENSION, v1.md §16B), not a fatal declared-vs-probed
+      // mismatch: skip the mismatch check for those images.
+      if (qaBoundary.invalidDimensionImageIds.has(img.id)) continue;
       if (dims.width !== img.width || dims.height !== img.height) {
         errors.push({
           code: 'IMAGE_DIMENSION_MISMATCH',
@@ -91,13 +109,21 @@ class ImportDatasetService {
     }
 
     const versionId = this.idGenerator();
-    const canonical = this.coco.normalize(dto, {
-      makeImageId: (cocoId) => `${versionId}::img::${cocoId}`,
-      makeAnnotationId: (cocoId) => `${versionId}::ann::${cocoId}`,
-      imageHashes,
-    });
 
-    for (const refError of this.validateReferences(canonical)) errors.push(refError);
+    const canonical = this.coco.normalize(
+      { ...dto, annotations: qaBoundary.annotationsForNormalize },
+      {
+        makeImageId: (cocoId) => `${versionId}::img::${cocoId}`,
+        makeAnnotationId: (cocoId) => `${versionId}::ann::${cocoId}`,
+        imageHashes,
+      }
+    );
+
+    // Dangling references are record-level QA concerns, not fatal (v1.md §13,
+    // §14). Keep every other reference error (duplicate ids, etc.) fatal.
+    for (const refError of this.validateReferences(canonical)) {
+      if (!QA_REFERENCE_CODES.has(refError.code)) errors.push(refError);
+    }
     if (errors.length > 0) {
       throw new ValidationError('Dataset failed import validation', { errors });
     }

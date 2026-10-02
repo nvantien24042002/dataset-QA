@@ -28,8 +28,15 @@ function parseCoco(raw) {
     if (!img.file_name) {
       throw new ValidationError(`COCO image[${i}].file_name is required`, { id: img.id });
     }
-    if (!Number.isFinite(img.width) || !Number.isFinite(img.height)) {
-      throw new ValidationError(`COCO image[${i}] width/height must be numbers`, { id: img.id });
+    // A width/height that is entirely ABSENT is a fatal structural failure
+    // (v1.md §5 row 6). A width/height that is PRESENT but has a bad value
+    // (<=0, NaN, Infinity, numeric string) is NOT fatal here: it is a
+    // record-level QA concern (INVALID_IMAGE_DIMENSION, v1.md §16B) and must
+    // survive parsing so the QA layer can see it. Structural checks only.
+    for (const field of ['width', 'height']) {
+      if (img[field] === undefined) {
+        throw new ValidationError(`COCO image[${i}].${field} is required`, { id: img.id });
+      }
     }
   });
 

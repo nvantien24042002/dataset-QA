@@ -1,21 +1,25 @@
 'use strict';
 
-// Phase 4 — Step 3B-3 unit test: runQaEngine record-rule orchestrator. Uses
-// FABRICATED QADatasetView objects (no COCO import) so the engine is tested in
-// isolation from parsing/normalization.
+// Phase 4 — runQaEngine unit test: record-rule orchestrator (Step 3B-3) plus the
+// geometric-rule wiring. Uses FABRICATED QADatasetView objects (no COCO import)
+// so the engine is tested in isolation from parsing/normalization. The default
+// fixture is geometrically CLEAN (large image, centered mid-size bbox) so the
+// record-focused tests assert only record behavior; geometric tests override the
+// bbox/image to trigger the geometric rules.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { runQaEngine } = require('../../src/domain/qa/runQaEngine');
 
-// A minimal valid view: one image, one annotation that references it.
+// A minimal valid view: one image, one annotation that references it. The bbox is
+// mid-sized and centered on a 640x480 image → no SMALL_OBJECT/TRUNCATED/OOB.
 const viewAnn = (overrides = {}) => ({
   rawId: 100,
   canonicalId: 'v::ann::100',
   rawImageId: 1,
   canonicalImageId: 'v::img::1',
   categoryId: 5,
-  bbox: [1, 2, 3, 4],
+  bbox: [100, 100, 50, 50],
   segmentation: null,
   ...overrides,
 });
@@ -23,8 +27,8 @@ const viewImg = (overrides = {}) => ({
   rawId: 1,
   canonicalId: 'v::img::1',
   fileName: 'a.png',
-  width: 10,
-  height: 20,
+  width: 640,
+  height: 480,
   ...overrides,
 });
 const view = ({ images, annotations, imageIds, categoryIds } = {}) => {
@@ -90,10 +94,14 @@ test('invalid image dimensions → INVALID_IMAGE_DIMENSION, raw image id in the 
   assert.ok(r.invalidSets.invalidDimensionImageIds.has(1));
 });
 
-// 7. Negative x/y but otherwise valid bbox
-test('negative x/y with valid size → no INVALID_BBOX', () => {
+// 7. Negative x/y but otherwise valid bbox: NOT INVALID_BBOX. With geometry now
+// wired it is instead handled by OUT_OF_BOUNDS_BBOX (and TRUNCATED), never
+// INVALID_BBOX.
+test('negative x/y with valid size → no INVALID_BBOX (handled as OOB/TRUNCATED)', () => {
   const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [-10, -5, 20, 20] })] }));
-  assert.deepStrictEqual([...r.issues], []);
+  assert.ok(!types(r).includes('INVALID_BBOX'));
+  assert.strictEqual(r.invalidSets.invalidBBoxAnnotationIds.size, 0);
+  assert.ok(types(r).includes('OUT_OF_BOUNDS_BBOX'));
 });
 
 // 8. Mixed numeric/string image ids resolve (H1)
@@ -245,14 +253,209 @@ test('records that have no canonical row are still inspected by the rules', () =
   assert.ok(r.invalidSets.invalidBBoxAnnotationIds.has(11));
 });
 
-// 18. No COCO reparsing — the engine only reads the view (guarded by not
-// requiring any parser/normalizer). A structural check on the source.
-test('runQaEngine imports only QA vocabulary and the record rules', () => {
+// 18. The engine orchestrates only domain QA modules (no parser/normalizer/
+// persistence/application). Structural check on the source.
+test('runQaEngine imports only QA vocabulary, record rules, eligibility, and geometric rules', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '../../src/domain/qa/runQaEngine.js'), 'utf8');
   const requires = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
-  assert.deepStrictEqual(requires.sort(), ['./QAVocabulary', './rules/recordRules']);
+  assert.deepStrictEqual(requires.sort(), [
+    './QAVocabulary',
+    './geometryEligibility',
+    './rules/geometricRules',
+    './rules/recordRules',
+  ]);
   // No parser, normalizer, persistence, or application-layer import.
   assert.ok(!/coco|CocoNormalizer|repositories|persistence|QADatasetViewBuilder|application/i.test(requires.join(',')));
+});
+
+// --- Geometric-rule wiring (Step 3B-5 wired into the engine) ---
+
+// B. Small annotation → SMALL_OBJECT appears.
+test('wiring: a small eligible annotation produces SMALL_OBJECT', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [100, 100, 8, 8] })] }));
+  assert.deepStrictEqual(types(r), ['SMALL_OBJECT']);
+  assert.strictEqual(r.issues[0].severity, 'HIGH'); // max side 8 < 10
+});
+
+// C. Near-edge annotation → TRUNCATED appears.
+test('wiring: a near-edge eligible annotation produces TRUNCATED', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [2, 100, 50, 50] })] }));
+  assert.deepStrictEqual(types(r), ['TRUNCATED']);
+  assert.deepStrictEqual(r.issues[0].details.touchedBoundaries, ['left']);
+});
+
+// D. OOB annotation → OUT_OF_BOUNDS_BBOX appears.
+test('wiring: an out-of-bounds eligible annotation produces OUT_OF_BOUNDS_BBOX', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [100, 100, 600, 50] })] }));
+  // x+w = 700 > 640 → OOB right; also within 5px of right so TRUNCATED too.
+  assert.ok(types(r).includes('OUT_OF_BOUNDS_BBOX'));
+});
+
+// E. One annotation triggers all three → all three descriptors preserved.
+test('wiring: small + truncated + out-of-bounds all coexist for one annotation', () => {
+  // Tiny bbox at a negative origin on a small image: w=h=8 (<20, max<10 → SMALL
+  // HIGH); x=-1 (<=5 TRUNCATED left, <0 OOB left).
+  const r = runQaEngine(
+    view({ images: [viewImg({ width: 8, height: 8 })], annotations: [viewAnn({ bbox: [-1, -1, 8, 8] })] })
+  );
+  assert.deepStrictEqual(types(r), ['SMALL_OBJECT', 'TRUNCATED', 'OUT_OF_BOUNDS_BBOX']);
+});
+
+// F. Category-reference-invalid annotation still receives geometric evaluation.
+test('wiring: a category-reference-invalid annotation is still evaluated geometrically', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ categoryId: 777, bbox: [100, 100, 8, 8] })] }));
+  // Both the record category issue AND the geometric small-object issue appear.
+  assert.deepStrictEqual(types(r), ['INVALID_CATEGORY_REFERENCE', 'SMALL_OBJECT']);
+});
+
+// G. Image-reference-invalid annotation gets no geometric descriptor.
+test('wiring: a dangling-image annotation is excluded from geometry', () => {
+  const r = runQaEngine(
+    view({ annotations: [viewAnn({ rawImageId: 999, canonicalImageId: null, canonicalId: null, bbox: [0, 0, 8, 8] })] })
+  );
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_REFERENCE']); // no SMALL_OBJECT/TRUNCATED/OOB
+});
+
+// H. Invalid-bbox annotation gets no geometric descriptor.
+test('wiring: an invalid-bbox annotation is excluded from geometry', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: [0, 0, -5, 8] })] }));
+  assert.deepStrictEqual(types(r), ['INVALID_BBOX']); // not also SMALL/TRUNCATED/OOB
+});
+
+// I. Invalid-dimension image excludes all its annotations from geometry.
+test('wiring: all annotations on a dimension-invalid image are excluded from geometry', () => {
+  const r = runQaEngine(
+    view({
+      images: [viewImg({ rawId: 1, canonicalId: 'v::img::1', width: 0 })],
+      annotations: [
+        viewAnn({ rawId: 10, bbox: [0, 0, 8, 8] }),
+        viewAnn({ rawId: 11, bbox: [2, 2, 8, 8] }),
+      ],
+    })
+  );
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION']); // one image-level issue, no geometry
+});
+
+// J. A different image being dimension-invalid leaves another image's annotation eligible.
+test('wiring: a dimension-invalid image does not suppress annotations on a valid image', () => {
+  const r = runQaEngine(
+    view({
+      images: [
+        viewImg({ rawId: 1, canonicalId: 'v::img::1', width: 640, height: 480 }),
+        viewImg({ rawId: 2, canonicalId: 'v::img::2', width: 0 }),
+      ],
+      annotations: [viewAnn({ rawId: 10, rawImageId: 1, canonicalImageId: 'v::img::1', bbox: [100, 100, 8, 8] })],
+      imageIds: new Set([1, 2]),
+    })
+  );
+  // image 2 → INVALID_IMAGE_DIMENSION; annotation on image 1 → SMALL_OBJECT.
+  assert.deepStrictEqual(types(r), ['INVALID_IMAGE_DIMENSION', 'SMALL_OBJECT']);
+});
+
+// K. Null bbox → no geometric descriptor; record issues remain.
+test('wiring: a null-bbox (segmentation-only) annotation produces no geometric issue', () => {
+  const r = runQaEngine(view({ annotations: [viewAnn({ bbox: null, segmentation: [[0, 0, 2, 0, 2, 2]] })] }));
+  assert.deepStrictEqual([...r.issues], []); // eligible but nothing for bbox rules to measure
+});
+
+// L. Numeric-string bbox/dims remain numerically correct through the engine.
+test('wiring: numeric-string bbox and image dims compute numerically', () => {
+  const r = runQaEngine(
+    view({
+      images: [viewImg({ width: '640', height: '480' })],
+      annotations: [viewAnn({ bbox: ['100', '100', '8', '8'] })],
+    })
+  );
+  assert.deepStrictEqual(types(r), ['SMALL_OBJECT']);
+  assert.strictEqual(r.issues[0].details.bboxWidth, 8); // numeric, not "8"
+});
+
+// M. Summary includes geometric counts, all keys present, zeros preserved.
+test('wiring: summary includes geometric type/severity counts with all keys present', () => {
+  const r = runQaEngine(
+    view({ images: [viewImg({ width: 8, height: 8 })], annotations: [viewAnn({ bbox: [-1, -1, 8, 8] })] })
+  );
+  // small HIGH + truncated MEDIUM + oob HIGH
+  assert.strictEqual(r.summary.totalIssues, 3);
+  assert.strictEqual(r.summary.issueTypeCounts.SMALL_OBJECT, 1);
+  assert.strictEqual(r.summary.issueTypeCounts.TRUNCATED, 1);
+  assert.strictEqual(r.summary.issueTypeCounts.OUT_OF_BOUNDS_BBOX, 1);
+  assert.strictEqual(r.summary.severityCounts.HIGH, 2);
+  assert.strictEqual(r.summary.severityCounts.MEDIUM, 1);
+  assert.strictEqual(r.summary.issueTypeCounts.MISSING_ANNOTATION, 0); // still present, zero
+  assert.strictEqual(Object.keys(r.summary.issueTypeCounts).length, 9);
+});
+
+// N. Record-rule regression: the four record issues are unchanged by wiring.
+test('wiring: record-level issues are unchanged (regression)', () => {
+  const r = runQaEngine(
+    view({
+      images: [viewImg({ rawId: 1 }), viewImg({ rawId: 2, canonicalId: 'v::img::2', width: 0 })],
+      annotations: [
+        viewAnn({ rawId: 10, rawImageId: 999, canonicalImageId: null, canonicalId: null }),
+        viewAnn({ rawId: 11, categoryId: 777 }),
+        viewAnn({ rawId: 12, bbox: [0, 0, 0, 5] }),
+      ],
+      imageIds: new Set([1, 2]),
+    })
+  );
+  // Record block exactly as before geometric wiring (fixtures are geometrically
+  // clean / ineligible), so no geometric descriptor is appended.
+  assert.deepStrictEqual(types(r), [
+    'INVALID_IMAGE_REFERENCE',
+    'INVALID_CATEGORY_REFERENCE',
+    'INVALID_BBOX',
+    'INVALID_IMAGE_DIMENSION',
+  ]);
+});
+
+// O. Deterministic ordering: record block, then geometric block in rule order.
+test('wiring: issue order is record block then SMALL_OBJECT, TRUNCATED, OUT_OF_BOUNDS', () => {
+  const r = runQaEngine(
+    view({
+      images: [viewImg({ width: 8, height: 8 })],
+      annotations: [
+        viewAnn({ rawId: 10, categoryId: 777, bbox: [-1, -1, 8, 8] }), // category ref + all 3 geometric
+      ],
+    })
+  );
+  assert.deepStrictEqual(types(r), [
+    'INVALID_CATEGORY_REFERENCE', // record block first
+    'SMALL_OBJECT',
+    'TRUNCATED',
+    'OUT_OF_BOUNDS_BBOX',
+  ]);
+});
+
+// Q. Properly gated eligible input never triggers the geometric image-resolution
+// ValidationError (correct gating makes it unreachable; no fallback added).
+test('wiring: properly gated input does not throw an image-resolution error', () => {
+  assert.doesNotThrow(() =>
+    runQaEngine(view({ annotations: [viewAnn({ bbox: [100, 100, 8, 8] })] }))
+  );
+});
+
+// R. All-ineligible dataset: record issues remain, no geometric issues.
+test('wiring: an all-ineligible dataset yields only record issues', () => {
+  const r = runQaEngine(
+    view({
+      annotations: [
+        viewAnn({ rawId: 10, rawImageId: 999, canonicalImageId: null, canonicalId: null, bbox: [0, 0, 8, 8] }),
+        viewAnn({ rawId: 11, bbox: [0, 0, -5, 8] }),
+      ],
+    })
+  );
+  assert.deepStrictEqual(types(r).sort(), ['INVALID_BBOX', 'INVALID_IMAGE_REFERENCE']);
+});
+
+// S. Empty view → complete zero-count summary.
+test('wiring: an empty view yields no issues and a complete zero-count summary', () => {
+  const r = runQaEngine({ images: [], annotations: [], imageIds: new Set(), categoryIds: new Set() });
+  assert.deepStrictEqual([...r.issues], []);
+  assert.strictEqual(r.summary.totalIssues, 0);
+  assert.strictEqual(Object.keys(r.summary.issueTypeCounts).length, 9);
+  assert.strictEqual(Object.keys(r.summary.severityCounts).length, 4);
+  assert.ok(Object.values(r.summary.issueTypeCounts).every((n) => n === 0));
 });

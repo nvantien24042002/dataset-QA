@@ -67,10 +67,17 @@ test('QA domain modules import only domain code', () => {
   const qaDir = path.join(__dirname, '../../src/domain/qa');
   const files = fs.readdirSync(qaDir).filter((name) => name.endsWith('.js'));
   assert.ok(files.length > 0);
-  // runQaEngine.js (Step 3B-3) is intentionally placed in src/domain/qa/ and
-  // orchestrates the pure domain QA rules in ./rules/recordRules.js. That
-  // intra-domain import is allowed; infrastructure/framework imports are not.
-  const allowed = new Set(['../errors', './QAVocabulary', './rules/recordRules']);
+  // runQaEngine.js (Step 3B-3 + geometric wiring) is intentionally placed in
+  // src/domain/qa/ and orchestrates the pure domain QA rules in ./rules/* plus
+  // the geometry-eligibility gate in ./geometryEligibility. Those intra-domain
+  // imports are allowed; infrastructure/framework/application imports are not.
+  const allowed = new Set([
+    '../errors',
+    './QAVocabulary',
+    './rules/recordRules',
+    './geometryEligibility',
+    './rules/geometricRules',
+  ]);
   for (const file of files) {
     const source = fs.readFileSync(path.join(qaDir, file), 'utf8');
     const requires = [...source.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);

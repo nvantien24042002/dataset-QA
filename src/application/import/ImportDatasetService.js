@@ -39,6 +39,14 @@ class ImportDatasetService {
     this.fingerprinter = deps.fingerprinter; // { datasetFingerprint, sha256Hex }
     this.idGenerator = deps.idGenerator || (() => crypto.randomUUID());
     this.clock = deps.clock || (() => new Date().toISOString());
+    // QA integration (Phase 4 final step). Injected, not constructed here, so the
+    // dependency direction stays inward (v2.md §15) and QAService owns its own
+    // run lifecycle / persistence. All three are optional: when absent, import
+    // behaves exactly as before (no post-commit QA), which keeps existing callers
+    // and tests that do not care about QA working unchanged.
+    this.qaService = deps.qaService || null;
+    this.buildQADatasetView = deps.buildQADatasetView || null;
+    this.rulesVersion = deps.rulesVersion || null;
   }
 
   // PLACEHOLDER_EXECUTE
@@ -110,13 +118,16 @@ class ImportDatasetService {
 
     const versionId = this.idGenerator();
 
+    // Canonical id factories. Hoisted so the SAME factories feed both the
+    // normalizer (persistence) and the post-commit QADatasetView: this guarantees
+    // the view's canonical ids are byte-identical to the persisted image/
+    // annotation primary keys, so QAIssue FK targets resolve.
+    const makeImageId = (cocoId) => `${versionId}::img::${cocoId}`;
+    const makeAnnotationId = (cocoId) => `${versionId}::ann::${cocoId}`;
+
     const canonical = this.coco.normalize(
       { ...dto, annotations: qaBoundary.annotationsForNormalize },
-      {
-        makeImageId: (cocoId) => `${versionId}::img::${cocoId}`,
-        makeAnnotationId: (cocoId) => `${versionId}::ann::${cocoId}`,
-        imageHashes,
-      }
+      { makeImageId, makeAnnotationId, imageHashes }
     );
 
     // Dangling references are record-level QA concerns, not fatal (v1.md §13,
@@ -179,7 +190,46 @@ class ImportDatasetService {
       throw e;
     }
 
-    return this.versions.findById(versionId);
+    // Import transaction has committed: the version is durably READY.
+    const version = this.versions.findById(versionId);
+
+    // --- Post-commit QA (separate operation, separate transaction) ---
+    // Runs ONLY after READY is committed. QA failure must never undo a valid
+    // import: the view is built from the SAME raw dto + inspection + id factories
+    // used above (never from persisted canonical data, which omits excluded
+    // records and original raw bboxes), categories come from the raw dto, and any
+    // throw from runAndPersist (engine failure or QA-persistence failure, both of
+    // which are isolated inside QAService's own transaction) is swallowed so the
+    // READY version is still returned. No storage/version compensation here —
+    // that belongs only to pre-commit import failures.
+    if (this.qaService && this.buildQADatasetView) {
+      try {
+        const view = this.buildQADatasetView({
+          dto,
+          inspection: qaBoundary,
+          makeImageId,
+          makeAnnotationId,
+        });
+        const categories = dto.categories.map((category) => ({
+          rawId: category.id,
+          name: category.name,
+        }));
+        this.qaService.runAndPersist({
+          datasetVersionId: versionId,
+          view,
+          categories,
+          rulesVersion: this.rulesVersion,
+        });
+      } catch (err) {
+        // Isolated: the import already committed and stays READY. Surface the QA
+        // failure without failing the import. No dedicated logger exists in this
+        // codebase, so stderr is the minimal, explicit choice.
+        // eslint-disable-next-line no-console
+        console.error(`QA run failed for dataset version ${versionId}:`, err && err.message ? err.message : err);
+      }
+    }
+
+    return version;
   }
 
   _annotationRow(annotation, versionId) {
